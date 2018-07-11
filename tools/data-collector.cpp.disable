@@ -1,0 +1,370 @@
+#define BOOST_LOG_DYN_LINK 1
+
+#include <iostream>
+#include <random>
+#include <unistd.h>
+#include <fstream>
+
+#include <ndn-cxx/face.hpp>
+#include <ndn-cxx/util/face-uri.hpp>
+#include <ndn-cxx/util/scheduler.hpp>
+#include <ndn-cxx/security/key-chain.hpp>
+#include <ndn-cxx/mgmt/nfd/controller.hpp>
+#include <ndn-cxx/security/transform/public-key.hpp>
+#include <ndn-cxx/util/in-memory-storage-persistent.hpp>
+
+#include <boost/filesystem.hpp>
+
+#include <PartialSync/logging.hpp>
+
+#include <repo-ng/repo-command-parameter.hpp>
+#include <repo-ng/repo-command-response.hpp>
+
+using namespace ndn;
+using namespace repo;
+
+_LOG_INIT(DataCollector);
+
+class DeviceSigner
+{
+public:
+  DeviceSigner(std::string& deviceName, Name& prefix, Name repoName, int lowerMin, int upperMin,
+               int numSensorType)
+  : m_face(m_ioService) // Create face with io_service object
+  , m_scheduler(m_ioService)
+  , m_controller(m_face, m_keyChain)
+  , m_deviceName(deviceName)
+  // /<BigCompany>/<Building1>/<ConfRoom>/sensor/<sensorName>/<sensorType>/<timestamp>
+  , m_prefix(Name(prefix).append(m_deviceName)) // Key Name prefix
+  , m_temperatureI(Name(m_deviceName).append("temperature")) // Data Name
+  , m_humidityI(Name(m_deviceName).append("humidity"))
+  , m_lightI(Name(m_deviceName).append("light"))
+  , m_dis(lowerMin, upperMin)  // 1*60*1000 - 5*60*1000 = 1 minute and 5 minutes
+  , m_repoPrefix(repoName)
+  , m_dataPrefix(Name(m_prefix))
+  , m_seqFileName(boost::filesystem::current_path().string() + "/seq/")
+  , m_numSensorType(numSensorType)
+  {
+    std::hash<std::string> hashFunction;
+    size_t hash = hashFunction(m_deviceName);
+    size_t overallSeed = hash + 1508446544;
+    std::mt19937 gen(overallSeed);
+    m_mt = gen;
+
+    m_seqFileName.append(m_deviceName);
+    m_seqFileName.append(".seq");
+    initiateSeqFromFile();
+
+    m_face.setInterestFilter(m_prefix,
+                           bind(&DeviceSigner::onInterestFromRepo, this, _1, _2),
+                           [this] (const Name& prefix) {
+                             _LOG_INFO("Prefix: " << prefix << " successfully registered.");
+                             initializeKey();
+                           },
+                           [] (const ndn::Name& prefix, const std::string& reason) {
+                             std::cerr << "Register failed: " << reason << std::endl;
+                           },
+                           security::SigningInfo(),
+                           nfd::ROUTE_FLAG_CAPTURE);
+  }
+
+  void
+  initiateSeqFromFile() {
+    std::ifstream inputFile(m_seqFileName.c_str());
+    if (inputFile.good()) {
+      std::string sensorSeq;
+      uint32_t seqNo = 0;
+
+      inputFile >> sensorSeq >> seqNo;
+      m_tempSeq = seqNo;
+
+      inputFile >> sensorSeq >> seqNo;
+      m_humidSeq= seqNo;
+
+      inputFile >> sensorSeq >> seqNo;;
+      m_lightSeq = seqNo;
+    } else {
+      writeSeqToFile();
+    }
+    inputFile.close();
+  }
+
+  void writeSeqToFile() {
+    std::ofstream outputFile(m_seqFileName.c_str());
+    std::ostringstream os;
+    os << "TempSeq " << std::to_string(m_tempSeq) << "\n"
+       << "HumidSeq "  << std::to_string(m_humidSeq)  << "\n"
+       << "LightSeq "  << std::to_string(m_lightSeq);
+    outputFile << os.str();
+    outputFile.close();
+  }
+
+  void
+  initializeKey()
+  {
+    std::shared_ptr<IdentityCertificate> certificate;
+    bool selfSignedExists = false;
+    if (m_keyChain.doesIdentityExist(m_prefix)) {
+      std::vector<Name> nameList;
+      Name certName;
+      m_keyChain.getAllCertificateNames(nameList, true);
+      for (const Name& name: nameList) {
+        if (m_prefix.isPrefixOf(name)){
+          certName = name;
+          //std::cout << name << std::endl;
+        }
+      }
+
+      if (m_keyChain.doesCertificateExist(certName)) {
+        certificate =  m_keyChain.getCertificate(certName);
+        const Name& signerName = certificate->getSignature().getKeyLocator().getName();
+        if (signerName.isPrefixOf(certificate->getName())) {
+          // Certificate is self signed
+          selfSignedExists = true;
+        }
+        else {
+          m_cert = certificate;
+          schedulerDataFetchFromSensors();
+          return;
+        }
+      }
+    }
+
+    if (!selfSignedExists) {
+      ndn::Name keyName = m_keyChain.generateRsaKeyPairAsDefault(m_prefix, true);
+      certificate = m_keyChain.selfSign(keyName);
+    }
+
+    usleep(1000000);
+
+    m_face.expressInterest(ndn::Name("/CA/building/uofm/dunn-hall/").append(certificate->wireEncode()),
+                           [&] (const Interest& interest, const Data& data) {
+                             //std::cout << "Got back data: " << data << std::endl;
+                             // Extract certificate from data and install
+                             Name certName = data.getName();
+                             std::shared_ptr<IdentityCertificate> cert =
+                               std::make_shared<IdentityCertificate>(certName.at(certName.size()-1).blockFromValue());
+                             //std::cout << *cert << std::endl;
+
+                             m_keyChain.addCertificateAsKeyDefault(*cert);
+                             m_cert = cert;
+                             usleep(2000000);
+                             schedulerDataFetchFromSensors();
+                           },
+                           [] (const Interest& interest, const lp::Nack& nack) {
+                             _LOG_INFO("received Nack with reason " << nack.getReason() <<
+                                       " for interest " << interest);
+                           },
+                           [] (const Interest& interest) {
+                             _LOG_INFO("Timeout " << interest);
+                           });
+    // Key name: /BigCompany/Building1/ConfRoom/Electricity/Panel1/key
+  }
+
+  void
+  schedulerDataFetchFromSensors()
+  {
+    // Immediately insert first data so that the consumers can get the full subscription list
+    if (m_numSensorType > 0) { // i.e, m_numSensorType 1
+      std::shared_ptr<Data> tempData = std::make_shared<Data>();
+      tempData->setName(m_temperatureI);
+      _LOG_DEBUG("Inserting first data temperature");
+      onData(Interest(m_temperatureI), *tempData);
+    }
+
+    if (m_numSensorType > 1) { // i.e, m_numSensorType 1 or 2
+      std::shared_ptr<Data> humidData = std::make_shared<Data>();
+      humidData->setName(m_humidityI);
+      _LOG_DEBUG("Inserting first data humidity");
+      onData(Interest(m_humidityI), *humidData);
+    }
+
+    if (m_numSensorType > 2) { //i.e, m_numSensorType 1 or 2 or 3
+      std::shared_ptr<Data> lightData = std::make_shared<Data>();
+      lightData->setName(m_lightI);
+      _LOG_DEBUG("Inserting first data light");
+      onData(Interest(m_lightI), *lightData);
+    }
+  }
+
+  void
+  sendInterest(const Name& interestName, int i = 3)
+  {
+    // All this just for log purposes
+    Name dataName(m_prefix);
+
+    Name typeName(m_deviceName);
+    typeName.append(interestName.get(interestName.size()-1).toUri());
+
+    if (typeName == m_temperatureI) {
+      dataName.append("temperature");
+      dataName.appendNumber(m_tempSeq);
+    }
+    else if (typeName == m_humidityI) {
+      dataName.append("humidity");
+      dataName.appendNumber(m_humidSeq);
+    }
+    else if (typeName == m_lightI) {
+      dataName.append("light");
+      dataName.appendNumber(m_lightSeq);
+    }
+    _LOG_INFO("Expressing interest: " << dataName);
+    Interest interest(interestName);
+    interest.setInterestLifetime(time::milliseconds(1000));
+    m_face.expressInterest(interest,
+                           bind(&DeviceSigner::onData, this, _1, _2),
+                           bind(&DeviceSigner::onNack, this, _1, _2),
+                           bind(&DeviceSigner::onTimeout, this, _1, i));;
+  }
+
+  void
+  onData(const Interest& interest, const Data& data)
+  {
+    Name dataName(m_prefix);
+
+    if (data.getName() == m_temperatureI) {
+      dataName.append("temperature");
+      dataName.appendNumber(m_tempSeq++);
+    }
+    else if (data.getName() == m_humidityI) {
+      dataName.append("humidity");
+      dataName.appendNumber(m_humidSeq++);
+    }
+    else if (data.getName() == m_lightI) {
+      dataName.append("light");
+      dataName.appendNumber(m_lightSeq++);
+    }
+    writeSeqToFile();
+
+    // Prepare data to be inserted into repo
+    std::shared_ptr<Data> repoData = std::make_shared<Data>();
+    // /uofm/dunn-hall/sensor/221/temperature/%00
+    repoData->setName(dataName);
+    repoData->setContent(data.getContent());
+    repoData->setFreshnessPeriod(time::milliseconds(1000));
+
+    // sign by identity: /uofm/dunn-hall/221/sensor/panel1/
+    m_keyChain.signByIdentity(*repoData, m_prefix);
+
+    //std::cout << "Inserting: " << repoData->getName() << std::endl;
+    _LOG_INFO("Inserting into repo: " << repoData->getName());
+
+    insertIntoRepo(repoData);
+
+    // Schedule fetch
+    //time::steady_clock::Duration after = ndn::time::milliseconds(m_dis(m_mt));
+    //m_scheduler.scheduleEvent(after, std::bind(&DeviceSigner::sendInterest, this, interest.getName(), 3));
+  }
+
+  void
+  insertIntoRepo(const std::shared_ptr<Data> data) {
+    // Insert into in memory persistent storage
+    m_ims.insert(*data);
+
+    RepoCommandParameter parameters;
+    parameters.setName(data->getName());
+
+    // Generate command interest
+    Interest interest(ndn::Name(m_repoPrefix)
+                      .append("insert")
+                      .append(parameters.wireEncode()));
+    interest.setInterestLifetime(time::milliseconds(4000));
+    m_keyChain.signWithSha256(interest);
+
+    m_face.expressInterest(interest,
+                           nullptr,
+                           [] (const Interest& interest, const ndn::lp::Nack& nack) {
+                             _LOG_INFO("Nack from repo " << nack.getReason());
+                           },
+                           [] (const Interest& interest) {
+                             _LOG_INFO("Timeout from repo");
+                           });
+  }
+
+  void
+  onInterestFromRepo(const ndn::Name& prefix, const ndn::Interest& interest) {
+
+    std::string checkKey = interest.getName().at(interest.getName().size()-3).toUri();
+    //_LOG_INFO(checkKey);
+    if (checkKey == "KEY") {
+      m_face.put(*m_cert);
+      return;
+    }
+
+    std::shared_ptr<const Data> data = m_ims.find(interest.getName());
+
+    if (!data) {
+      _LOG_INFO("Data not found in IMS! " << interest.getName());
+      return;
+    }
+
+    _LOG_INFO("Sending data to repo: " << data->getName());
+
+    m_face.put(*data);
+  }
+
+  void
+  onNack(const Interest& interest, const lp::Nack& nack)
+  {
+    _LOG_INFO("received Nack with reason " << nack.getReason()
+              << " for interest " << interest);
+  }
+
+  void
+  onTimeout(const Interest& interest, int i = 3)
+  {
+     if (i == 0) {
+      return;
+     }
+    _LOG_INFO("Timeout " << interest << " resending " << i << " time");
+    sendInterest(interest.getName(), --i);
+  }
+
+  void run()
+  {
+    try {
+      m_face.processEvents();
+    } catch (std::runtime_error& e) {
+      std::cerr << e.what() << std::endl;
+      return;
+    }
+  }
+
+private:
+  boost::asio::io_service m_ioService;
+  Face m_face;
+  Scheduler m_scheduler;
+  KeyChain m_keyChain;
+  nfd::Controller m_controller;
+
+  // Device name is used to create a face to the device
+  // Prefix is the prefix of the data name that the device is listening to
+  std::string m_deviceName;
+  Name m_prefix;
+  Name m_temperatureI, m_humidityI, m_lightI;
+  uint32_t m_tempSeq = 0, m_humidSeq = 0, m_lightSeq = 0;
+
+  std::mt19937 m_mt;
+  std::uniform_int_distribution<int> m_dis;
+
+  Name m_repoPrefix, m_dataPrefix;
+  ndn::util::InMemoryStoragePersistent m_ims;
+  std::string m_seqFileName;
+  int m_numSensorType;
+  std::shared_ptr<IdentityCertificate> m_cert;
+};
+
+int main(int argc, char* argv[]) {
+  if ( argc != 7 ) {
+    std::cout << " Usage: " << argv[0]
+              << " <deviceName> <prefix - /Company/building/roomNumber> <repoName>"
+              << "<lowerMin> <upperMin> <numSensorType 1 or 2 or 3 >\n";
+  }
+  else {
+    std::string deviceName(argv[1]);
+    Name prefix(argv[2]);
+    Name repoName(argv[3]);
+    DeviceSigner ds(deviceName, prefix, repoName, std::stoi(argv[4]), std::stoi(argv[5]), std::stoi(argv[6]));
+    ds.run();
+  }
+}

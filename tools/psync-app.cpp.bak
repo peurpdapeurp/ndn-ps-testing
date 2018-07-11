@@ -1,0 +1,115 @@
+#define BOOST_LOG_DYN_LINK 1
+
+#include "../src/repo-command-parameter.hpp"
+#include "../src/repo-command-response.hpp"
+#include <iostream>
+
+#include <PartialSync/bloom_filter.hpp>
+#include <PartialSync/logging.hpp>
+#include <PartialSync/logic_repo.hpp>
+#include <PartialSync/logic_consumer.hpp>
+
+#include <ndn-cxx/encoding/block-helpers.hpp>
+#include <ndn-cxx/security/key-chain.hpp>
+#include <ndn-cxx/util/notification-subscriber.hpp>
+#include <ndn-cxx/util/scheduler.hpp>
+
+using namespace psync;
+using namespace ndn;
+using namespace repo;
+
+_LOG_INIT(PSyncApp);
+
+class PSyncApp
+{
+public:
+  PSyncApp(Name pubSubGroupPrefix, Name repoName, const int IBFSize)
+  : m_pubSubGroupPrefix(pubSubGroupPrefix)
+  , m_repoName(repoName)
+  // /<group-prefix>/psync
+  , m_pSyncPrefix(Name(pubSubGroupPrefix).append("psync"))
+  , m_IBFSize(IBFSize)
+  , m_scheduler(m_face.getIoService())
+  // /localhost/repo1/datastream/insert
+  , m_subscriber(m_face, Name("localhost").append("datastream").append(repoName).append("insert"))
+  {
+  }
+
+  ~PSyncApp() {
+    m_connection.disconnect();
+  }
+
+public:
+  void run()
+  {
+    initializeSyncRepo();
+
+    try {
+      m_face.processEvents();
+    } catch (std::runtime_error& e) {
+      std::cerr << e.what() << std::endl;
+      return;
+    }
+  }
+
+protected:
+  void initializeSyncRepo()
+  {
+    BOOST_ASSERT(m_psyncRepo == nullptr);
+
+    m_psyncRepo = std::make_shared<LogicRepo>(m_IBFSize, m_face, m_pSyncPrefix,
+                                              time::milliseconds(4000),
+                                              time::milliseconds(4000));
+
+    m_connection = m_subscriber.onNotification.connect(std::bind(&PSyncApp::onUpdateFromRepo, this, _1));
+    m_subscriber.start();
+  }
+
+  void
+  onUpdateFromRepo(const Data& data) {
+    //_LOG_INFO("Got data from repo: " << data.getName());
+
+    // Publish to PSync anyway - whether we got our own data or from someone else
+    Name ds = data.getName();
+    //std::cout << ds << std::endl;
+
+    // toNumber returns uint64_t
+    uint64_t seq = ds.get(ds.size()-1).toNumber();
+
+    _LOG_INFO("New data for sensor from repo notif: " << ds.getPrefix(-1) << " seq: " << seq);
+    //std::cout << "New data for sensor: " << ds.getPrefix(-1) << " seq: " << seq << std::endl;
+
+    // No need to publishData to PSync IMS - repo has it
+    m_psyncRepo->updateSeq(ds.getPrefix(-1).toUri(), seq);
+  }
+
+protected:
+  Name m_pubSubGroupPrefix;
+  Name m_repoName;
+
+  Name m_pSyncPrefix;
+  int m_IBFSize;
+
+  Face m_face;
+  util::Scheduler m_scheduler;
+  KeyChain m_keyChain;
+
+  // PSync
+  std::shared_ptr<LogicRepo> m_psyncRepo;
+
+  // Notification from Repo
+  util::NotificationSubscriber<Data> m_subscriber;
+  util::signal::Connection m_connection;
+};
+
+int main(int argc, char* argv[]) {
+  if ( argc != 4 ) {
+    std::cout << " Usage: " << argv[0]
+              << " <pub-sub group prefix> <repoName> <IBFSize>\n";
+  }
+  else {
+    Name group(argv[1]);
+    PSyncApp PSyncApp(group, Name(argv[2]), atoi(argv[3]));
+    PSyncApp.run();
+  }
+}
