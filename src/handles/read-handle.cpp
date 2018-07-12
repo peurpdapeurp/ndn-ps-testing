@@ -50,7 +50,9 @@ void
 ReadHandle::onInterest(const Name& prefix, const Interest& interest)
 {
   shared_ptr<ndn::Data> data = getStorageHandle().readData(interest);
+  std::cout << "Got an interest: " << interest.getName().toUri() << std::endl;
   if (data != nullptr) {
+    std::cout << "Found data to satisfy interest, putting to face." << std::endl;
       getFace().put(*data);
   }
 }

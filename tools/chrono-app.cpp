@@ -111,11 +111,8 @@ protected:
     // Content is the name
     ds.wireDecode(data.getContent().blockFromValue());
 
-    // Get seqNumber from the data Name
-    uint32_t seq = ds.get(ds.size()-1).toNumber();
-
     //_LOG_INFO("ChronoSync DS Update: " << ds.getPrefix(-1) << "/" << seq);
-    std::cout << "ChronoSync DS Update: " << ds.getPrefix(-1) << "/" << seq << std::endl;
+    std::cout << "ChronoSync DS Update: " << ds.toUri() << std::endl;
     insertIntoRepo(ds);
   }
 
@@ -146,17 +143,6 @@ protected:
 
   void
   insertIntoRepo(const Name& dataName) {
-    try {
-      std::string dataType = dataName.at(dataName.size()-2).toUri();
-      if (dataType == "temperature" || dataType == "light" || dataType == "humidity") {}
-      else {
-        return;
-      }
-    } catch (const std::exception& e) {
-      std::cout << e.what() << std::endl;
-      return;
-    }
-
     //_LOG_INFO("Inserting data into repo: " << dataName);
     std::cout << "Inserting data into repo: " << dataName << std::endl;
 
