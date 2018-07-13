@@ -38,7 +38,7 @@ public:
   , m_deviceName(deviceName)
   // /<BigCompany>/<Building1>/<ConfRoom>/sensor/<sensorName>/<sensorType>/<timestamp>
   , m_prefix(Name(prefix).append(m_deviceName)) // Key Name prefix
-  , m_repoPrefix(repoName)
+  , m_repoPrefix(Name("localhost").append(repoName))
   , m_seqFileName("/home/pi/repo-ng/seq/")
   , m_cmdSigner(m_keyChain)
   {
