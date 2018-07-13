@@ -195,6 +195,8 @@ public:
 
     interest.setInterestLifetime(time::milliseconds(4000));
 
+    std::cout << "Sending repo command interest iwth name: " << interest.getName().toUri() << std::endl;
+
     m_face.expressInterest(interest,
                            nullptr,
                            [] (const Interest& interest, const ndn::lp::Nack& nack) {
