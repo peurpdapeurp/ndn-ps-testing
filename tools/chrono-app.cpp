@@ -183,8 +183,9 @@ protected:
                                         time::milliseconds(1000),
                                         m_chronoSyncUserPrefix);
         return;
-      }
+      } 
     }
+    std::cout << "Got an update from the repo about data we retrieved from another repo, not publishing to Chronosync." << std::endl;
   }
 
 protected:

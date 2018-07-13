@@ -129,6 +129,7 @@ public:
   onData(const Interest& interest, const Data& data)
   {
     Name dataName(m_prefix);
+    dataName.append(m_repoPrefix);
 
     dataName.appendNumber(m_seq++);
     writeSeqToFile();
