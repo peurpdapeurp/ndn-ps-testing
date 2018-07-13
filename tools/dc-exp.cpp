@@ -37,7 +37,7 @@ public:
   : m_scheduler(m_face.getIoService())
   , m_deviceName(deviceName)
   // /<BigCompany>/<Building1>/<ConfRoom>/sensor/<sensorName>/<sensorType>/<timestamp>
-  , m_prefix(Name(prefix).append(m_deviceName)) // Key Name prefix
+  , m_prefix(Name(prefix).append(m_repoName).append(m_deviceName)) // Key Name prefix
   , m_repoPrefix(Name("localhost").append(repoName))
   , m_repoName(repoName)
   , m_seqFileName("/home/pi/repo-ng/seq/")
