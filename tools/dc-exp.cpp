@@ -36,9 +36,9 @@ public:
   DeviceSigner(std::string& deviceName, Name& prefix, Name repoName, int interval)
   : m_scheduler(m_face.getIoService())
   , m_deviceName(deviceName)
-  , m_repoName(repoName)
+  , m_repoName(repoName.toUri())
   // /<BigCompany>/<Building1>/<ConfRoom>/sensor/<sensorName>/<sensorType>/<timestamp>
-  , m_prefix(Name(prefix).append(m_repoName).append(m_deviceName)) // Key Name prefix
+  , m_prefix(Name(prefix).append(repoName)) // Key Name prefix
   , m_repoPrefix(Name("localhost").append(repoName))
   , m_seqFileName("/home/pi/repo-ng/seq/")
   , m_cmdSigner(m_keyChain)
@@ -46,6 +46,9 @@ public:
     m_interval = interval;
     m_seq = 0;
 
+    m_prefix.append(m_deviceName);
+    std::cout << "m_prefix : " << m_prefix.toUri() << std::endl;
+    
     m_seqFileName.append(m_deviceName);
     m_seqFileName.append(".seq");
     initiateSeqFromFile();
@@ -130,7 +133,6 @@ public:
   onData(const Interest& interest, const Data& data)
   {
     Name dataName(m_prefix);
-    dataName.append(m_repoName);
 
     dataName.appendNumber(m_seq++);
     writeSeqToFile();
@@ -241,6 +243,7 @@ private:
   // Device name is used to create a face to the device
   // Prefix is the prefix of the data name that the device is listening to
   std::string m_deviceName;
+  std::string m_repoName;
   Name m_prefix;
   uint32_t m_seq;
   
@@ -248,7 +251,6 @@ private:
 
   ndn::InMemoryStoragePersistent m_ims;
   ndn::Name m_repoPrefix;
-  ndn::Name m_repoName;
   std::string m_seqFileName;
   ndn::security::CommandInterestSigner m_cmdSigner;
 };
