@@ -36,10 +36,10 @@ public:
   DeviceSigner(std::string& deviceName, Name& prefix, Name repoName, int interval)
   : m_scheduler(m_face.getIoService())
   , m_deviceName(deviceName)
+  , m_repoName(repoName)
   // /<BigCompany>/<Building1>/<ConfRoom>/sensor/<sensorName>/<sensorType>/<timestamp>
   , m_prefix(Name(prefix).append(m_repoName).append(m_deviceName)) // Key Name prefix
   , m_repoPrefix(Name("localhost").append(repoName))
-  , m_repoName(repoName)
   , m_seqFileName("/home/pi/repo-ng/seq/")
   , m_cmdSigner(m_keyChain)
   {
